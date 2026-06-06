@@ -21,19 +21,27 @@ engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 async def fetch_json(session, url):
-    async with session.get(url) as response:
-        return await response.json()
+    try:
+        async with session.get(url) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                raise Exception(f"Ошибка статуса: {response.status} для URL: {url}")
+    except Exception as e:
+        print(f"Ошибка при запросе к {url}: {e}")
+        return None
 
 async def resolve_homeworld(session, homeworld_url):
     data = await fetch_json(session, BASE_URL + homeworld_url)
     return data['name']
 
 async def resolve_films(session, films_urls):
+    tasks = [fetch_json(session, BASE_URL + url) for url in films_urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     titles = []
-    for url in films_urls:
-        data = await fetch_json(session, BASE_URL + url)
-        titles.append(data['title'])
-    return ", ".join(titles)
+    for result in results:
+        if result and isinstance(result, dict):
+            titles.append(result['title'])
 
 async def resolve_starships(session, starships_urls):
     classes = []
@@ -80,6 +88,7 @@ async def process_character(session, character):
         await db.commit()
 
 async def main():
+    semaphore = asyncio.Semaphore(10)
     async with aiohttp.ClientSession() as session:
         page = 1
         all_tasks = []
@@ -87,10 +96,15 @@ async def main():
             url = f"{BASE_URL}/people?page={page}&limit=10"
             data = await fetch_json(session, url)
 
+            if not data or not data.get('results'):
+                break
+
             for character in data['results']:
-                task = asyncio.create_task(process_character(session, character))
-                all_tasks.append(task)
+                async with semaphore:
+                    task = asyncio.create_task(process_character(session, character))
+                    all_tasks.append(task)
             page += 1
+
         await asyncio.gather(*all_tasks)
         print("Все данные загружены!")
 
